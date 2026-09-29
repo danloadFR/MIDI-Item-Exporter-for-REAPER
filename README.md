@@ -18,6 +18,14 @@ Particularly useful for saving collections of **drum grooves, fills, patterns**,
 * REAPER
 * [js_ReaScriptAPI](https://forum.cockos.com/showthread.php?t=212174)
 
+## Installation
+
+Download **`Export selected MIDI items as individual MIDI files.lua`** from this GitHub repository.
+
+Place the `.lua` file in REAPER's **Scripts** folder, then load it into REAPER using:
+
+**Actions → Show action list → ReaScript → Load**
+
 ## Platforms
 
 **Windows / macOS / Linux**
