@@ -4,13 +4,14 @@
   Features:
   - One .mid file per selected MIDI item
   - The beginning of each item becomes MIDI time 0
-  - 960 PPQ
+  - Output resolution: 960 PPQ
   - Notes only
   - All notes are forced to MIDI channel 1
   - Note velocities are preserved
   - Filename: NN_ItemName.mid
-  - NN = number of beats, always 2 digits
+  - NN = duration in beats, always 2 digits
   - A native folder browser is used to select the destination folder
+  - Source MIDI PPQ resolution is detected automatically
   - Requires js_ReaScriptAPI
 --]]
 
@@ -20,7 +21,7 @@ local r = reaper
 -- SETTINGS
 ------------------------------------------------------------
 
-local PPQ = 960
+local OUTPUT_PPQ = 960
 
 ------------------------------------------------------------
 -- Check for js_ReaScriptAPI
@@ -123,6 +124,47 @@ local function sanitize_filename(name)
     end
 
     return name
+end
+
+------------------------------------------------------------
+-- Get the PPQ resolution of a MIDI source
+--
+-- REAPER stores this in the item state chunk as:
+--
+-- HASDATA 1 960 QN
+--
+-- or:
+--
+-- HASDATA 1 96 QN
+------------------------------------------------------------
+
+local function get_midi_ppq(item)
+
+    local ok, chunk =
+        r.GetItemStateChunk(
+            item,
+            "",
+            false
+        )
+
+    if not ok or not chunk then
+        return nil
+    end
+
+    local ppq =
+        chunk:match(
+            "HASDATA%s+1%s+(%d+)%s+QN"
+        )
+
+    if ppq then
+        ppq = tonumber(ppq)
+
+        if ppq and ppq > 0 then
+            return ppq
+        end
+    end
+
+    return nil
 end
 
 ------------------------------------------------------------
@@ -306,7 +348,7 @@ local function create_midi_file(
 
     write_u16(f, 0)
     write_u16(f, 1)
-    write_u16(f, PPQ)
+    write_u16(f, OUTPUT_PPQ)
 
     --------------------------------------------------------
     -- MIDI Track
@@ -359,236 +401,277 @@ for i = 0, item_count - 1 do
     if take and r.TakeIsMIDI(take) then
 
         ----------------------------------------------------
-        -- Item position and length
+        -- Get source MIDI PPQ resolution
         ----------------------------------------------------
 
-        local item_pos =
-            r.GetMediaItemInfo_Value(
-                item,
-                "D_POSITION"
-            )
+        local source_ppq =
+            get_midi_ppq(item)
 
-        local item_len =
-            r.GetMediaItemInfo_Value(
-                item,
-                "D_LENGTH"
-            )
-
-        local item_end =
-            item_pos + item_len
-
-        ----------------------------------------------------
-        -- Calculate item length in beats
-        ----------------------------------------------------
-
-        local start_qn =
-            r.TimeMap2_timeToQN(
-                0,
-                item_pos
-            )
-
-        local end_qn =
-            r.TimeMap2_timeToQN(
-                0,
-                item_end
-            )
-
-        local beats =
-            math.floor(
-                (end_qn - start_qn) + 0.5
-            )
-
-        ----------------------------------------------------
-        -- Get the take name
-        --
-        -- In REAPER, this is generally the name displayed
-        -- for a MIDI item.
-        ----------------------------------------------------
-
-        local _, item_name =
-            r.GetSetMediaItemTakeInfo_String(
-                take,
-                "P_NAME",
-                "",
-                false
-            )
-
-        if item_name == "" then
-            item_name = "MIDI_Item"
-        end
-
-        item_name =
-            sanitize_filename(
-                item_name
-            )
-
-        ----------------------------------------------------
-        -- Build filename
-        --
-        -- Example:
-        -- 04_Bass Pattern.mid
-        -- 08_Bass Pattern.mid
-        -- 16_Bass Pattern.mid
-        ----------------------------------------------------
-
-        local filename =
-            string.format(
-                "%02d_%s.mid",
-                beats,
-                item_name
-            )
-
-        local filepath =
-            folder ..
-            "/" ..
-            filename
-
-        ----------------------------------------------------
-        -- Get PPQ positions corresponding to item bounds
-        ----------------------------------------------------
-
-        local item_start_ppq =
-            r.MIDI_GetPPQPosFromProjTime(
-                take,
-                item_pos
-            )
-
-        local item_end_ppq =
-            r.MIDI_GetPPQPosFromProjTime(
-                take,
-                item_end
-            )
-
-        ----------------------------------------------------
-        -- Retrieve MIDI notes
-        ----------------------------------------------------
-
-        local _, note_count, _, _ =
-            r.MIDI_CountEvts(take)
-
-        local notes = {}
-
-        for n = 0, note_count - 1 do
-
-            local ok,
-                  selected,
-                  muted,
-                  startppq,
-                  endppq,
-                  chan,
-                  pitch,
-                  velocity =
-                r.MIDI_GetNote(
-                    take,
-                    n
-                )
-
-            if ok then
-
-                ------------------------------------------------
-                -- Keep notes that overlap the item
-                ------------------------------------------------
-
-                if endppq > item_start_ppq
-                   and startppq < item_end_ppq then
-
-                    ------------------------------------------------
-                    -- Convert positions to item-relative PPQ
-                    ------------------------------------------------
-
-                    local rel_start =
-                        startppq -
-                        item_start_ppq
-
-                    local rel_end =
-                        endppq -
-                        item_start_ppq
-
-                    ------------------------------------------------
-                    -- Clamp notes to item boundaries
-                    ------------------------------------------------
-
-                    if rel_start < 0 then
-                        rel_start = 0
-                    end
-
-                    if rel_end >
-                       (item_end_ppq -
-                        item_start_ppq) then
-
-                        rel_end =
-                            item_end_ppq -
-                            item_start_ppq
-                    end
-
-                    if rel_end > rel_start then
-
-                        table.insert(
-                            notes,
-                            {
-                                start =
-                                    math.floor(
-                                        rel_start + 0.5
-                                    ),
-
-                                stop =
-                                    math.floor(
-                                        rel_end + 0.5
-                                    ),
-
-                                pitch = pitch,
-
-                                velocity = velocity
-                            }
-                        )
-                    end
-                end
-            end
-        end
-
-        ----------------------------------------------------
-        -- Handle duplicate filenames
-        ----------------------------------------------------
-
-        local final_path =
-            filepath
-
-        local counter = 2
-
-        while io.open(
-            final_path,
-            "rb"
-        ) do
-
-            final_path =
-                folder ..
-                "/" ..
-                string.format(
-                    "%02d_%s_%d.mid",
-                    beats,
-                    item_name,
-                    counter
-                )
-
-            counter = counter + 1
-        end
-
-        ----------------------------------------------------
-        -- Create MIDI file
-        ----------------------------------------------------
-
-        if create_midi_file(
-            final_path,
-            notes
-        ) then
-
-            exported =
-                exported + 1
-
-        else
+        if not source_ppq then
 
             skipped =
                 skipped + 1
+
+        else
+
+            ------------------------------------------------
+            -- Item position and length
+            ------------------------------------------------
+
+            local item_pos =
+                r.GetMediaItemInfo_Value(
+                    item,
+                    "D_POSITION"
+                )
+
+            local item_len =
+                r.GetMediaItemInfo_Value(
+                    item,
+                    "D_LENGTH"
+                )
+
+            local item_end =
+                item_pos + item_len
+
+            ------------------------------------------------
+            -- Calculate item length in beats
+            ------------------------------------------------
+
+            local start_qn =
+                r.TimeMap2_timeToQN(
+                    0,
+                    item_pos
+                )
+
+            local end_qn =
+                r.TimeMap2_timeToQN(
+                    0,
+                    item_end
+                )
+
+            local beats =
+                math.floor(
+                    (end_qn - start_qn) + 0.5
+                )
+
+            ------------------------------------------------
+            -- Get the take name
+            ------------------------------------------------
+
+            local _, item_name =
+                r.GetSetMediaItemTakeInfo_String(
+                    take,
+                    "P_NAME",
+                    "",
+                    false
+                )
+
+            if item_name == "" then
+                item_name = "MIDI_Item"
+            end
+
+            item_name =
+                sanitize_filename(
+                    item_name
+                )
+
+            ------------------------------------------------
+            -- Build filename
+            ------------------------------------------------
+
+            local filename =
+                string.format(
+                    "%02d_%s.mid",
+                    beats,
+                    item_name
+                )
+
+            local filepath =
+                folder ..
+                "/" ..
+                filename
+
+            ------------------------------------------------
+            -- Get PPQ positions corresponding to item bounds
+            ------------------------------------------------
+
+            local item_start_ppq =
+                r.MIDI_GetPPQPosFromProjTime(
+                    take,
+                    item_pos
+                )
+
+            local item_end_ppq =
+                r.MIDI_GetPPQPosFromProjTime(
+                    take,
+                    item_end
+                )
+
+            ------------------------------------------------
+            -- Conversion factor
+            --
+            -- Example:
+            --
+            -- 96 PPQ  -> 960 PPQ = x10
+            -- 480 PPQ -> 960 PPQ = x2
+            -- 960 PPQ -> 960 PPQ = x1
+            ------------------------------------------------
+
+            local ppq_scale =
+                OUTPUT_PPQ / source_ppq
+
+            ------------------------------------------------
+            -- Retrieve MIDI notes
+            ------------------------------------------------
+
+            local _, note_count, _, _ =
+                r.MIDI_CountEvts(take)
+
+            local notes = {}
+
+            for n = 0, note_count - 1 do
+
+                local ok,
+                      selected,
+                      muted,
+                      startppq,
+                      endppq,
+                      chan,
+                      pitch,
+                      velocity =
+                    r.MIDI_GetNote(
+                        take,
+                        n
+                    )
+
+                if ok then
+
+                    ------------------------------------------------
+                    -- Keep notes that overlap the item
+                    ------------------------------------------------
+
+                    if endppq > item_start_ppq
+                       and startppq < item_end_ppq then
+
+                        ------------------------------------------------
+                        -- Convert positions to item-relative PPQ
+                        ------------------------------------------------
+
+                        local rel_start =
+                            startppq -
+                            item_start_ppq
+
+                        local rel_end =
+                            endppq -
+                            item_start_ppq
+
+                        ------------------------------------------------
+                        -- Clamp notes to item boundaries
+                        ------------------------------------------------
+
+                        if rel_start < 0 then
+                            rel_start = 0
+                        end
+
+                        if rel_end >
+                           (item_end_ppq -
+                            item_start_ppq) then
+
+                            rel_end =
+                                item_end_ppq -
+                                item_start_ppq
+                        end
+
+                        if rel_end > rel_start then
+
+                            ------------------------------------------------
+                            -- Convert source PPQ to output PPQ
+                            ------------------------------------------------
+
+                            rel_start =
+                                rel_start *
+                                ppq_scale
+
+                            rel_end =
+                                rel_end *
+                                ppq_scale
+
+                            table.insert(
+                                notes,
+                                {
+                                    start =
+                                        math.floor(
+                                            rel_start + 0.5
+                                        ),
+
+                                    stop =
+                                        math.floor(
+                                            rel_end + 0.5
+                                        ),
+
+                                    pitch = pitch,
+
+                                    velocity = velocity
+                                }
+                            )
+                        end
+                    end
+                end
+            end
+
+            ------------------------------------------------
+            -- Handle duplicate filenames
+            ------------------------------------------------
+
+            local final_path =
+                filepath
+
+            local counter = 2
+
+            while true do
+
+                local test_file =
+                    io.open(
+                        final_path,
+                        "rb"
+                    )
+
+                if not test_file then
+                    break
+                end
+
+                test_file:close()
+
+                final_path =
+                    folder ..
+                    "/" ..
+                    string.format(
+                        "%02d_%s_%d.mid",
+                        beats,
+                        item_name,
+                        counter
+                    )
+
+                counter = counter + 1
+            end
+
+            ------------------------------------------------
+            -- Create MIDI file
+            ------------------------------------------------
+
+            if create_midi_file(
+                final_path,
+                notes
+            ) then
+
+                exported =
+                    exported + 1
+
+            else
+
+                skipped =
+                    skipped + 1
+            end
         end
 
     else
